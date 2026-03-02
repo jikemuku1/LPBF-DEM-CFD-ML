@@ -1,0 +1,27 @@
+# Python 3.9+ recommended
+# Install with: pip install -r requirements.txt
+
+# Core scientific computing
+numpy>=1.23.0
+pandas>=1.5.0
+scipy>=1.9.0
+openpyxl>=3.0.10        # required by pandas for .xlsx reading
+
+# Machine learning
+scikit-learn>=1.1.0
+xgboost>=1.7.0
+lightgbm>=3.3.0
+catboost>=1.1.0
+
+# Neural network (BPNN — model_BPNN.py)
+tensorflow>=2.10.0
+
+# Visualization
+matplotlib>=3.6.0
+seaborn>=0.12.0
+
+# Optimisation (Fig. 15 — NSGA-II, script forthcoming)
+pymoo>=0.6.0
+
+# Progress bar
+tqdm>=4.64.0
