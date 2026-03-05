@@ -413,6 +413,5 @@ bpnn_importance_porosity = analyze_bpnn_features(best_bpnn_porosity, feature_nam
 print("\n" + "=" * 80)
 print("BPNN REGRESSION ANALYSIS COMPLETED!")
 print("=" * 80)
-print(f"Final dataset size: {len(X)} samples")
-print(f"Number of features: {len(feature_columns)}")
-print(f"Outlier removal: {len(df_engineered) - len(X)} samples removed")
+
+
