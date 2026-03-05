@@ -44,6 +44,8 @@ LPBF-DEM-CFD-ML/
 │   ├── model_CatBoost.py                      ← CatBoost (Fig. 13h)
 │   └── compare_models_Fig14.py                ← Model comparison (Fig. 14)
 │
+├── NSGA-II optimization/                      ← NSGA-II optimization (Fig. 15)
+│   ├── NSGA2.py                               ← NSGA-II optimization (Fig. 15)
 └── figure_scripts/                            ← Additional figure scripts
     ├── fig05_CDF_consistency_check.py         ← Fig. 5: CDF validation of data
     └── fig16_correlation_heatmap.py           ← Fig. 16: Pearson correlation heatmap
@@ -151,6 +153,7 @@ python model_LightGBM.py      # Fig. 13g → Fig13g_LightGBM_CrossVal_Results.pn
 python model_CatBoost.py      # Fig. 13h → Fig13h_CatBoost_CrossVal_Results.png
 
 python compare_models_Fig14.py          # Fig. 14 → Fig14_Model_Comparison.png
+python NSGA2.py               # Fig. 15 → Fig_NSGA2_Pareto.png
 ```
 
 ### Reproduce additional figures
@@ -185,7 +188,7 @@ python fig16_correlation_heatmap.py     # Fig. 16 → Fig16_Correlation_Heatmap.
 | Fig. 4 | ANSYS Fluent post-processor contour plots |
 | Fig. 6 | SEM — experimental image |
 | Fig. 8 | Statistical box plots (Origin software) |
-| Fig. 15 | NSGA-II Pareto optimisation — script to be added |
+| Fig. 15 | NSGA-II Pareto optimisation |
 | Fig. 17 | Verification |
 | Fig. 18 | 3-D contour maps — script to be added |
 
