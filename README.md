@@ -190,7 +190,7 @@ python fig16_correlation_heatmap.py     # Fig. 16 → Fig16_Correlation_Heatmap.
 | Fig. 8 | Statistical box plots (Origin software) |
 | Fig. 15 | NSGA-II Pareto optimisation |
 | Fig. 17 | Verification |
-| Fig. 18 | 3-D contour maps — script to be added |
+| Fig. 18 | 3-D contour maps |
 
 ---
 
