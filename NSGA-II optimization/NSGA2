@@ -1,0 +1,321 @@
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import joblib
+import warnings
+warnings.filterwarnings('ignore')
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  [1] Load the CONSISTENT GPR surrogate bundle
+#  Run model_GPR_forNSGAII_CONSISTENT.py FIRST
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n[1/6] Loading CONSISTENT GPR surrogate bundle...")
+BUNDLE_PATH = 'gpr_surrogate_bundle.pkl'
+bundle = joblib.load(BUNDLE_PATH)
+
+m_w               = bundle['m_w']
+m_d               = bundle['m_d']
+m_p               = bundle['m_p']
+scaler_X          = bundle['scaler_X']
+scaler_y_width    = bundle['scaler_y_width']
+scaler_y_depth    = bundle['scaler_y_depth']
+scaler_y_porosity = bundle['scaler_y_porosity']
+feature_columns   = bundle['feature_columns']  # 38 features
+bounds            = bundle['bounds']
+
+P_LO, P_HI = bounds['P_LO'], bounds['P_HI']
+V_LO, V_HI = bounds['V_LO'], bounds['V_HI']
+R_LO, R_HI = bounds['R_LO'], bounds['R_HI']
+BOUNDS_LO   = np.array([P_LO, V_LO, R_LO])
+BOUNDS_HI   = np.array([P_HI, V_HI, R_HI])
+
+print(f"  ✓ Models    : m_w, m_d, m_p")
+print(f"  ✓ Scalers   : scaler_X ({len(feature_columns)} features)")
+print(f"  ✓ Bounds    : P=[{P_LO:.0f},{P_HI:.0f}] W  V=[{V_LO:.0f},{V_HI:.0f}] mm/s  R=[{R_LO:.3f},{R_HI:.3f}] mm")
+print(f"\n  feature_columns in bundle (First 3 are raw inputs):")
+for i, col in enumerate(feature_columns):
+    if i < 5 or i >= len(feature_columns)-3:  # Show first 5 and last 3
+        print(f"    [{i:02d}] {col}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  [2] Feature engineering - RECONSTRUCTS ALL 38 FEATURES
+# ══════════════════════════════════════════════════════════════════════════════
+def make_features(P, V, R):
+    """
+    Builds the EXACT 38 features (3 raw + 35 engineered) from scalars P, V, R.
+    Returns a (1, 38) numpy array in the EXACT order of bundle['feature_columns'].
+    """
+    row = pd.DataFrame({
+        'Power [W]':         [float(P)],
+        'Velocity [mm s-1]': [float(V)],
+        'Radius [mm]':       [float(R)],
+    })
+    # 35 engineered features (IDENTICAL to create_comprehensive_features)
+    row['Linear_Energy_Density']       = P / V
+    row['Area_Energy_Density']         = P / (V * R)
+    row['Volumetric_Energy_Density']   = P / (V * R * 0.1)
+    row['Specific_Energy']             = P / (V * R**2)
+    row['Energy_Flux']                 = P / (np.pi * R**2)
+    row['Beam_Area']                   = np.pi * R**2
+    row['Beam_Circumference']          = 2 * np.pi * R
+    row['Beam_Diameter']               = 2 * R
+    row['Aspect_Ratio_Energy']         = P / (V * R)
+    row['Power_per_Area']              = P / (np.pi * R**2)
+    row['Power_per_Radius']            = P / R
+    row['Intensity']                   = P / (np.pi * R**2)
+    row['Specific_Power']              = P / R
+    row['Stability_Index']             = (P * R) / V
+    row['Process_Efficiency']          = P / (V * R**3)
+    row['Thermal_Gradient']            = P / R**2
+    row['Melting_Parameter']           = P * R / V
+    row['Heat_Affected_Zone']          = R**2 / V
+    row['Radius_Velocity_Ratio']       = R / V
+    row['Power_Radius_Ratio']          = P / R
+    row['Energy_Concentration']        = P / R**2
+    row['Dimensionless_Energy']        = (P * R) / V**2
+    row['Power_Radius_Interaction']    = P * R
+    row['Velocity_Radius_Interaction'] = V * R
+    row['Power_Velocity_Radius']       = P * V * R
+    row['P_V_R_Combined']              = P / (V * R)
+    row['Log_Power']                   = np.log(P + 1e-6)
+    row['Log_Velocity']                = np.log(V + 1e-6)
+    row['Log_Radius']                  = np.log(R + 1e-6)
+    row['Radius_Squared']              = R**2
+    row['Inverse_Radius']              = 1.0 / (R + 1e-6)
+    row['Energy_Density_Radius']       = P / (V * R**3)
+    row['Conduction_Parameter']        = P / (V * R)
+    row['Penetration_Ratio']           = P / (V * R**0.5)
+    row['Fusion_Parameter']            = (P * R) / V
+
+    row.replace([np.inf, -np.inf], np.nan, inplace=True)
+    row.fillna(0, inplace=True)
+
+    # CRITICAL: Return columns in the exact order the GPR model was trained on
+    return row[feature_columns].values   # (1, 38)
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  [3] Objective function for NSGA-II
+# ══════════════════════════════════════════════════════════════════════════════
+AR_TARGET = 0.75   # Desired aspect ratio
+AR_LO     = 0.50   # Lower bound
+AR_HI     = 0.8   # Upper bound
+
+def predict_objectives(pvr):
+    """Predict Porosity and Aspect Ratio for a given [P, V, R] vector."""
+    P, V, R = pvr
+    X_raw = make_features(P, V, R)      # (1, 38) features
+    X_s   = scaler_X.transform(X_raw)   # Scaled
+
+    w_norm   = float(m_w.predict(X_s))
+    d_norm   = float(m_d.predict(X_s))
+    por_norm = float(m_p.predict(X_s))
+
+    w   = float(scaler_y_width.inverse_transform([[w_norm]])[0, 0])
+    d   = float(scaler_y_depth.inverse_transform([[d_norm]])[0, 0])
+    por = float(scaler_y_porosity.inverse_transform([[por_norm]])[0, 0])
+
+    ar = d / (w + 1e-9)
+    return max(por, 0.0), ar
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  [4] NSGA-II Algorithm (Core - Unchanged)
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n[4/6] Running NSGA-II (80 pop × 60 gen)...")
+N_VAR, N_OBJ = 3, 2
+
+def evaluate_pop(pop):
+    objs = []
+    for ind in pop:
+        por, ar = predict_objectives(ind)
+        objs.append([por, abs(ar - AR_TARGET)])  # Minimize porosity and AR deviation
+    return np.array(objs)
+
+def fast_nds(objs):
+    n  = len(objs)
+    S  = [[] for _ in range(n)]
+    nd = np.zeros(n, int)
+    fronts = [[]]
+    for i in range(n):
+        for j in range(n):
+            if i == j: continue
+            if np.all(objs[i] <= objs[j]) and np.any(objs[i] < objs[j]):
+                S[i].append(j)
+            elif np.all(objs[j] <= objs[i]) and np.any(objs[j] < objs[i]):
+                nd[i] += 1
+        if nd[i] == 0:
+            fronts[0].append(i)
+    k = 0
+    while fronts[k]:
+        nf = []
+        for i in fronts[k]:
+            for j in S[i]:
+                nd[j] -= 1
+                if nd[j] == 0: nf.append(j)
+        k += 1; fronts.append(nf)
+    return fronts[:-1]
+
+def crowd_dist(objs, front):
+    if len(front) <= 2: return np.full(len(front), np.inf)
+    dist = np.zeros(len(front))
+    F    = objs[front]
+    for m in range(N_OBJ):
+        idx  = np.argsort(F[:, m])
+        dist[idx[0]] = dist[idx[-1]] = np.inf
+        rng  = F[idx[-1], m] - F[idx[0], m]
+        if rng == 0: continue
+        for k in range(1, len(front)-1):
+            dist[idx[k]] += (F[idx[k+1], m] - F[idx[k-1], m]) / rng
+    return dist
+
+def tournament(pop, objs, fronts):
+    rank  = np.zeros(len(pop), int)
+    crowd = np.zeros(len(pop))
+    for r, f in enumerate(fronts):
+        cd = crowd_dist(objs, f)
+        for ii, i in enumerate(f):
+            rank[i] = r; crowd[i] = cd[ii]
+    def bt():
+        a, b = np.random.randint(0, len(pop), 2)
+        if rank[a] < rank[b]: return a
+        if rank[b] < rank[a]: return b
+        return a if crowd[a] >= crowd[b] else b
+    return bt()
+
+def sbx(p1, p2, eta=20):
+    c1, c2 = p1.copy(), p2.copy()
+    for i in range(N_VAR):
+        if np.random.rand() < 0.5:
+            u = np.random.rand()
+            b = ((2*u)**(1/(eta+1)) if u <= 0.5
+                 else (1/(2*(1-u)))**(1/(eta+1)))
+            c1[i] = 0.5*((1+b)*p1[i] + (1-b)*p2[i])
+            c2[i] = 0.5*((1-b)*p1[i] + (1+b)*p2[i])
+    return c1, c2
+
+def poly_mut(ind, eta=20):
+    c = ind.copy()
+    for i in range(N_VAR):
+        if np.random.rand() < 1/N_VAR:
+            d  = BOUNDS_HI[i] - BOUNDS_LO[i]
+            u  = np.random.rand()
+            dm = ((2*u)**(1/(eta+1)) - 1 if u < 0.5
+                  else 1 - (2*(1-u))**(1/(eta+1)))
+            c[i] = np.clip(c[i] + dm*d, BOUNDS_LO[i], BOUNDS_HI[i])
+    return c
+
+def nsga2(pop_size=80, n_gen=60, seed=42):
+    np.random.seed(seed)
+    pop  = BOUNDS_LO + np.random.rand(pop_size, N_VAR) * (BOUNDS_HI - BOUNDS_LO)
+    objs = evaluate_pop(pop)
+    for gen in range(n_gen):
+        fronts = fast_nds(objs)
+        off = []
+        while len(off) < pop_size:
+            c1, c2 = sbx(pop[tournament(pop, objs, fronts)],
+                         pop[tournament(pop, objs, fronts)])
+            off += [np.clip(poly_mut(c1), BOUNDS_LO, BOUNDS_HI),
+                    np.clip(poly_mut(c2), BOUNDS_LO, BOUNDS_HI)]
+        off  = np.array(off[:pop_size])
+        oob  = evaluate_pop(off)
+        cp, co = np.vstack([pop, off]), np.vstack([objs, oob])
+        cf     = fast_nds(co)
+        np_, no_ = [], []
+        for f in cf:
+            if len(np_) + len(f) <= pop_size:
+                for i in f: np_.append(cp[i]); no_.append(co[i])
+            else:
+                cd  = crowd_dist(co, f)
+                idx = np.argsort(-cd)
+                for k in range(pop_size - len(np_)):
+                    np_.append(cp[f[idx[k]]]); no_.append(co[f[idx[k]]])
+                break
+        pop = np.array(np_); objs = np.array(no_)
+        if (gen+1) % 10 == 0:
+            pf = fast_nds(objs)[0]
+            print(f"  Gen {gen+1:3d}/{n_gen}  Pareto={len(pf):3d}  Best porosity={objs[pf,0].min():.4f}")
+    return pop, objs, fast_nds(objs)[0]
+
+pop, objs, pf_idx = nsga2(pop_size=80, n_gen=60)
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  [5] Background Cloud & Filtering
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n[5/6] Building background cloud for visualization...")
+AR_CAP  = 2.9
+np.random.seed(42)
+N_CLOUD = 200
+P_c = np.random.uniform(P_LO, P_HI, N_CLOUD)
+V_c = np.random.uniform(V_LO, V_HI, N_CLOUD)
+R_c = np.random.uniform(R_LO, R_HI, N_CLOUD)
+
+# Generate a plausible synthetic cloud (as in your original script)
+ec    = (P_c/P_HI) * (1 - V_c/V_HI) * (1 / (R_c/R_LO))
+ec_n  = (ec - ec.min()) / (ec.max() - ec.min() + 1e-9)
+cloud_w = np.clip(0.032 + (0.08-0.032)*(0.4*(R_c/R_HI) + 0.4*(1-ec_n) + 0.2*np.random.uniform(0.8, 1.2, N_CLOUD)), 0.032, 0.08)
+cloud_d = np.clip(0.032 + (0.065-0.032)*ec_n + np.random.normal(0, 0.003, N_CLOUD), 0.032, 0.065)
+cloud_d = np.minimum(cloud_d, AR_CAP * cloud_w)
+cloud_ar = cloud_d / (cloud_w + 1e-9)
+ved_c   = P_c / (V_c * R_c**2)
+ved_n   = (ved_c - ved_c.min()) / (ved_c.max() - ved_c.min() + 1e-9)
+cloud_por = np.clip(0.01 + (2.5-0.01)*(0.7*ved_n + 0.2*(P_c-P_LO)/(P_HI-P_LO) + 0.1*(1-(V_c-V_LO)/(V_HI-V_LO))) + np.random.normal(0, 0.03, N_CLOUD), 0, 2.5)
+
+MAX_POROSITY = 0.25  # 最大孔隙率阈值 = 0.25%
+pareto_por = objs[pf_idx, 0]
+pareto_ar  = np.array([predict_objectives(pop[i])[1] for i in pf_idx])
+
+pareto_opt = (pareto_ar >= AR_LO) & (pareto_ar <= AR_HI) & (pareto_por <= MAX_POROSITY)
+cloud_opt  = (cloud_ar  >= AR_LO) & (cloud_ar  <= AR_HI) & (cloud_por  <= MAX_POROSITY)
+
+if pareto_opt.sum() == 0:
+    print("  ⚠ No Pareto points in optimal zone; relaxing AR to 0.5–1.5 ...")
+    pareto_opt = (pareto_ar >= 0.5) & (pareto_ar <= 1.5) & (pareto_por <= MAX_POROSITY)
+    cloud_opt  = (cloud_ar  >= 0.5) & (cloud_ar  <= 1.5) & (cloud_por <= MAX_POROSITY)
+# ══════════════════════════════════════════════════════════════════════════════
+#  [6] Generate the Final Plot
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n[6/6] Generating Pareto front plot...")
+plt.rcParams['font.family'] = 'Times New Roman'
+fig, ax = plt.subplots(figsize=(11, 8))
+
+ax.scatter(cloud_por[~cloud_opt], cloud_ar[~cloud_opt],
+           # color='#555555', s=45, alpha=0.65, zorder=2, label='Generated Data')
+           color='#555555', s=120, alpha=0.65, zorder=2, label='Generated Data')
+if (~pareto_opt).sum() > 0:
+    ax.scatter(pareto_por[~pareto_opt], pareto_ar[~pareto_opt],
+               color='#555555', s=55, alpha=0.8, zorder=3)
+if cloud_opt.sum() > 0:
+    ax.scatter(cloud_por[cloud_opt], cloud_ar[cloud_opt],
+               # color='red', edgecolors='black', linewidths=0.6, s=85, alpha=0.9,
+               # color='red', edgecolors='black', linewidths=0.6, s=90, alpha=0.9,
+               color='red', edgecolors='black', linewidths=0.6, s=140, alpha=0.9,
+               zorder=4, label='Optimal Region')
+if pareto_opt.sum() > 0:
+    ax.scatter(pareto_por[pareto_opt], pareto_ar[pareto_opt],
+               # color='red', edgecolors='black', linewidths=0.6, s=85, alpha=0.9, zorder=5)
+               # color='red', edgecolors='black', linewidths=0.6, s=90, alpha=0.9, zorder=5)
+               color='red', edgecolors='black', linewidths=0.6, s=140, alpha=0.9, zorder=5)
+
+ax.axhline(y=AR_LO, color='#DAA520', linestyle='--', linewidth=2.5, alpha=0.9, label='Acceptable AR', zorder=1)
+ax.axhline(y=AR_HI, color='#DAA520', linestyle='--', linewidth=2.5, alpha=0.9, zorder=1)
+
+ax.axvline(x=MAX_POROSITY, color='purple', linestyle='-.', linewidth=2.5,
+           alpha=0.9, label='Max Porosity = 0.25%', zorder=1)
+
+# ax.set_xlabel('Porosity [%]', fontsize=22, fontweight='bold')
+ax.set_xlabel('Porosity [%]', fontsize=28, fontweight='bold')
+# ax.set_ylabel('Aspect Ratio (Depth/Width)', fontsize=22, fontweight='bold')
+ax.set_ylabel('Aspect Ratio (Depth/Width)', fontsize=28, fontweight='bold')
+# ax.tick_params(axis='both', labelsize=18, direction='in', width=2)
+ax.tick_params(axis='both', labelsize=28, direction='in', width=2)
+for lbl in ax.get_xticklabels() + ax.get_yticklabels(): lbl.set_fontweight('bold')
+for sp in ax.spines.values(): sp.set_linewidth(2)
+ax.set_xlim(-0.05, max(cloud_por.max(), pareto_por.max()) * 1.1)
+ax.set_ylim(0.0, min(AR_CAP*1.1, max(cloud_ar.max(), pareto_ar.max())*1.1))
+# ax.legend(loc='upper right', fontsize=13, frameon=True, edgecolor='black', fancybox=False)
+ax.grid(False)
+plt.tight_layout()
+plt.savefig('Fig_NSGA2_Pareto.png', dpi=300, bbox_inches='tight')
+plt.show()
+print("✓ Figure saved → Fig_NSGA2_Pareto.png")
